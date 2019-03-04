@@ -75,6 +75,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -104,6 +105,7 @@ public class DefaultExecutionPlan implements ExecutionPlan {
     private final Map<File, String> canonicalizedFileCache = Maps.newIdentityHashMap();
     private final Map<Pair<Node, Node>, Boolean> reachableCache = Maps.newHashMap();
     private final Set<Node> dependenciesCompleteCache = Sets.newHashSet();
+    private final Set<Node> dependenciesWithChanges = Sets.newHashSet();
     private final WorkerLeaseService workerLeaseService;
     private final GradleInternal gradle;
 
@@ -335,6 +337,7 @@ public class DefaultExecutionPlan implements ExecutionPlan {
         }
         executionQueue.clear();
         Iterables.addAll(executionQueue, nodeMapping);
+        Iterables.addAll(dependenciesWithChanges, nodeMapping);
     }
 
     private MutationInfo getOrCreateMutationsOf(Node node) {
@@ -506,6 +509,7 @@ public class DefaultExecutionPlan implements ExecutionPlan {
         canonicalizedFileCache.clear();
         reachableCache.clear();
         dependenciesCompleteCache.clear();
+        dependenciesWithChanges.clear();
         runningNodes.clear();
     }
 
@@ -685,7 +689,11 @@ public class DefaultExecutionPlan implements ExecutionPlan {
             return true;
         }
 
+        if (!(node instanceof TaskNodeFactory.TaskInAnotherBuild) && !dependenciesWithChanges.contains(node)) {
+            return false;
+        }
         boolean dependenciesComplete = node.allDependenciesComplete();
+        dependenciesWithChanges.remove(node);
         if (dependenciesComplete) {
             dependenciesCompleteCache.add(node);
         }
@@ -852,6 +860,7 @@ public class DefaultExecutionPlan implements ExecutionPlan {
 
     private void recordNodeCompleted(Node node) {
         runningNodes.remove(node);
+        Iterables.addAll(dependenciesWithChanges, node.getAllPredecessors());
         MutationInfo mutations = this.mutations.get(node);
         for (Node producer : mutations.producingNodes) {
             MutationInfo producerMutations = this.mutations.get(producer);
@@ -873,7 +882,7 @@ public class DefaultExecutionPlan implements ExecutionPlan {
     public void nodeComplete(Node node) {
         try {
             if (!node.isComplete()) {
-                enforceFinalizers(node);
+                enforceFinalizers(node, dependenciesWithChanges);
                 if (node.isFailed()) {
                     handleFailure(node);
                 }
@@ -886,10 +895,13 @@ public class DefaultExecutionPlan implements ExecutionPlan {
         }
     }
 
-    private static void enforceFinalizers(Node node) {
+    private static void enforceFinalizers(Node node, Set<Node> nodesWithDependencyChanges) {
         for (Node finalizerNode : node.getFinalizers()) {
+            nodesWithDependencyChanges.add(finalizerNode);
             if (finalizerNode.isRequired() || finalizerNode.isMustNotRun()) {
-                enforceWithDependencies(finalizerNode, Sets.<Node>newHashSet());
+                HashSet<Node> enforcedNodes = Sets.newHashSet();
+                enforceWithDependencies(finalizerNode, enforcedNodes);
+                nodesWithDependencyChanges.addAll(enforcedNodes);
             }
         }
     }
